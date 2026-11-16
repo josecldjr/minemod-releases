@@ -78,10 +78,30 @@ jobs:
             [Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [Drawing.Point]::Empty, $b.Size)
             $bmp.Save((Join-Path $shots "$name.png"))
           }
+          Add-Type -TypeDefinition @'
+          using System.Runtime.InteropServices;
+          public static class Mouse {
+            [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+            [DllImport("user32.dll")] public static extern void mouse_event(int flags, int dx, int dy, int data, int extra);
+            public static void Click(int x, int y) { SetCursorPos(x, y); mouse_event(2, 0, 0, 0, 0); mouse_event(4, 0, 0, 0, 0); }
+          }
+          '@
           function Find-Text($window, $pattern) {
             $all = $window.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
             foreach ($e in $all) { if ($e.Current.Name -like $pattern) { return $e } }
             return $null
+          }
+          function Click-Button($window, $name) {
+            $all = $window.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
+            foreach ($e in $all) {
+              if ($e.Current.Name -eq $name -and $e.Current.ControlType -eq [Windows.Automation.ControlType]::Button) {
+                $r = $e.Current.BoundingRectangle
+                [Mouse]::Click([int]($r.X + $r.Width / 2), [int]($r.Y + $r.Height / 2))
+                return
+              }
+            }
+            Shot 'erro'
+            throw "botão não encontrado: $name"
           }
           function Wait-Text($window, $pattern, $seconds) {
             for ($i = 0; $i -lt $seconds * 2; $i++) {
@@ -100,8 +120,7 @@ jobs:
 
           Wait-Text $window 'Pronto para instalar*' 60 | Out-Null
           Shot '1-pronto-para-instalar'
-          $button = Wait-Text $window 'Instalar' 5
-          $button.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+          Click-Button $window 'Instalar'
           Wait-Text $window 'Pronto! MineMod*' 180 | Out-Null
           Shot '2-instalado'
           Stop-Process -Id $p.Id
