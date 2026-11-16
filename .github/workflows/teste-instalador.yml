@@ -94,7 +94,10 @@ jobs:
           function Click-Button($window, $name) {
             $all = $window.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
             foreach ($e in $all) {
-              if ($e.Current.Name -eq $name -and $e.Current.ControlType -eq [Windows.Automation.ControlType]::Button) {
+              Write-Output ("  [{0}] '{1}' {2}" -f $e.Current.ControlType.ProgrammaticName, $e.Current.Name, $e.Current.BoundingRectangle)
+            }
+            foreach ($e in $all) {
+              if ($e.Current.Name -eq $name -and -not $e.Current.BoundingRectangle.IsEmpty) {
                 $r = $e.Current.BoundingRectangle
                 [Mouse]::Click([int]($r.X + $r.Width / 2), [int]($r.Y + $r.Height / 2))
                 return
