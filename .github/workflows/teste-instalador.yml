@@ -1,0 +1,127 @@
+# Testa a release mais recente num Windows limpo, com um .minecraft falso: o instalador baixa tudo de verdade
+# (GitHub e meta.fabricmc.net), instala, confere os hashes e mostra as telas.
+name: Teste do instalador
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Baixar o instalador da release mais recente
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'teste'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          $base = 'https://github.com/${{ github.repository }}/releases/latest/download'
+          Invoke-WebRequest "$base/MineMod-Instalador.exe" -OutFile (Join-Path $dir 'MineMod-Instalador.exe') -UseBasicParsing
+          Invoke-WebRequest "$base/manifest.json" -OutFile (Join-Path $dir 'manifest.json') -UseBasicParsing
+          Get-Content (Join-Path $dir 'manifest.json')
+
+      - name: Instalar sem janela (com a checagem de jogo e launcher abertos)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'teste'
+          $exe = Join-Path $dir 'MineMod-Instalador.exe'
+          $mc = Join-Path $dir 'mc-auto\.minecraft'
+          New-Item -ItemType Directory -Force $mc | Out-Null
+          [IO.File]::WriteAllText((Join-Path $mc 'launcher_profiles.json'),
+            '{"profiles":{"abc":{"name":"Vanilla","type":"latest-release","icon":"Grass"}},"settings":{"crashAssistance":true},"version":3}')
+          [IO.File]::WriteAllText((Join-Path $mc 'options.txt'), "lang:pt_br`r`n")
+
+          $p = Start-Process $exe -ArgumentList '--auto', '--dir', $mc -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content (Join-Path $env:TEMP 'MineMod-Instalador.log'); throw "saiu com $($p.ExitCode)" }
+
+          $m = Get-Content (Join-Path $dir 'manifest.json') -Raw | ConvertFrom-Json
+          $fabric = "fabric-loader-$($m.fabric_loader)-$($m.minecraft)"
+          $profiles = Get-Content (Join-Path $mc 'launcher_profiles.json') -Raw | ConvertFrom-Json
+          if ($profiles.profiles.minemod.lastVersionId -ne $fabric) { throw "perfil MineMod não aponta para $fabric" }
+          if ($profiles.profiles.abc.name -ne 'Vanilla') { throw 'perfil do jogador foi alterado' }
+          if (-not (Test-Path (Join-Path $mc "versions\$fabric\$fabric.json"))) { throw 'versão do Fabric não gravada' }
+          foreach ($f in $m.arquivos) {
+            $path = Join-Path $mc "minemod\mods\$($f.nome)"
+            $hash = (Get-FileHash $path -Algorithm SHA256).Hash.ToLower()
+            if ($hash -ne $f.sha256) { throw "hash errado em $($f.nome)" }
+            Write-Output "ok $($f.nome)"
+          }
+          if (-not (Test-Path (Join-Path $mc 'minemod\options.txt'))) { throw 'options.txt não copiado' }
+
+          $p = Start-Process $exe -ArgumentList '--auto', '--dir', $mc -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "segunda execução saiu com $($p.ExitCode)" }
+          if (-not (Select-String -Path (Join-Path $env:TEMP 'MineMod-Instalador.log') -Pattern 'UpToDate' -Quiet)) {
+            throw 'segunda execução não reconheceu que está em dia'
+          }
+          Get-Content (Join-Path $env:TEMP 'MineMod-Instalador.log')
+
+      - name: Instalar pela janela, clicando nos botões
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Windows.Forms, System.Drawing
+          $dir = Join-Path $env:RUNNER_TEMP 'teste'
+          $exe = Join-Path $dir 'MineMod-Instalador.exe'
+          $shots = Join-Path $env:RUNNER_TEMP 'telas'
+          New-Item -ItemType Directory -Force $shots | Out-Null
+          $mc = Join-Path $dir 'mc-janela\.minecraft'
+          New-Item -ItemType Directory -Force $mc | Out-Null
+          [IO.File]::WriteAllText((Join-Path $mc 'launcher_profiles.json'), '{"profiles":{},"version":3}')
+
+          function Shot($name) {
+            $b = [Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bmp = New-Object Drawing.Bitmap $b.Width, $b.Height
+            [Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [Drawing.Point]::Empty, $b.Size)
+            $bmp.Save((Join-Path $shots "$name.png"))
+          }
+          function Find-Text($window, $pattern) {
+            $all = $window.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
+            foreach ($e in $all) { if ($e.Current.Name -like $pattern) { return $e } }
+            return $null
+          }
+          function Wait-Text($window, $pattern, $seconds) {
+            for ($i = 0; $i -lt $seconds * 2; $i++) {
+              $e = Find-Text $window $pattern
+              if ($e) { return $e }
+              Start-Sleep -Milliseconds 500
+            }
+            Shot 'erro'
+            throw "não apareceu: $pattern"
+          }
+
+          $p = Start-Process $exe -ArgumentList '--dir', $mc -PassThru
+          for ($i = 0; $i -lt 40 -and $p.MainWindowHandle -eq 0; $i++) { Start-Sleep -Milliseconds 500; $p.Refresh() }
+          if ($p.MainWindowHandle -eq 0) { throw 'a janela não abriu' }
+          $window = [Windows.Automation.AutomationElement]::FromHandle($p.MainWindowHandle)
+
+          Wait-Text $window 'Pronto para instalar*' 60 | Out-Null
+          Shot '1-pronto-para-instalar'
+          $button = Wait-Text $window 'Instalar' 5
+          $button.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+          Wait-Text $window 'Pronto! MineMod*' 180 | Out-Null
+          Shot '2-instalado'
+          Stop-Process -Id $p.Id
+
+          $p = Start-Process $exe -ArgumentList '--dir', $mc -PassThru
+          for ($i = 0; $i -lt 40 -and $p.MainWindowHandle -eq 0; $i++) { Start-Sleep -Milliseconds 500; $p.Refresh() }
+          $window = [Windows.Automation.AutomationElement]::FromHandle($p.MainWindowHandle)
+          Wait-Text $window 'Tudo certo!*' 60 | Out-Null
+          Shot '3-tudo-certo'
+          Stop-Process -Id $p.Id
+
+      - name: Guardar as telas e o log
+        if: always()
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force (Join-Path $env:RUNNER_TEMP 'telas') | Out-Null
+          Copy-Item (Join-Path $env:TEMP 'MineMod-Instalador.log') (Join-Path $env:RUNNER_TEMP 'telas') -ErrorAction SilentlyContinue
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: telas-e-log
+          path: ${{ runner.temp }}/telas
